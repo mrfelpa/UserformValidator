@@ -2,7 +2,7 @@
 /*
 Plugin Name: UserformValidator
 Description: Validates user permission levels and blocks unauthorized access attempts.
-Version: 1.0
+Version: 1.1
 Author: 0x5FE
 */
 
@@ -35,11 +35,15 @@ function is_user_valid($username) {
     }
 
     $allowed_permission_levels = array('administrator', 'editor', 'author');
-    if (!in_array($user->roles[0], $allowed_permission_levels)) {
-        return false;
+    $user_roles = $user->roles;
+
+    foreach ($user_roles as $role) {
+        if (in_array($role, $allowed_permission_levels)) {
+            return true;
+        }
     }
 
-    return true;
+    return false;
 }
 
 function is_brute_force_attempt($username) {
@@ -97,7 +101,7 @@ function is_password_valid($password) {
 }
 
 function block_login_attempt($error_message) {
-    $login_url = wp_login_url();
+    $login_url = site_url('wp-login.php');
     wp_redirect(add_query_arg('login_error', urlencode($error_message), $login_url));
     exit;
 }
