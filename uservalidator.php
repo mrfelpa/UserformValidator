@@ -1,130 +1,128 @@
 <?php
 /*
 Plugin Name: UserformValidator
-Description: Validates user permission levels and blocks unauthorized 
-access attempts.
-Version: 1.2
+Description: Validates user permission levels and blocks unauthorized access attempts.
+Version: 1.3
 Author: Mr.Felpa
 */
 
-add_action('login_form', 'validate_user_permission');
+defined('ABSPATH') or die('No direct access allowed.');
 
-function validate_user_permission() {
-    if (isset($_POST['log']) && isset($_POST['pwd']) && 
-isset($_POST['_wpnonce'])) {
-        $username = sanitize_user($_POST['log']);
-        $password = sanitize_text_field($_POST['pwd']);
-        $nonce = sanitize_text_field($_POST['_wpnonce']);
+class UserformValidator {
 
+    private $allowed_roles = ['administrator', 'editor', 'author'];
+    private $max_login_attempts = 5;
+    private $lockout_duration = 300;
+    private $password_min_length = 8;
+    private $common_passwords = ['123456', 'password', 'qwerty'];
 
-        if (!wp_verify_nonce($nonce, 'login_form')) {
-            block_login_attempt('Invalid security token.');
-        }
-
-        if (!is_user_valid($username)) {
-            block_login_attempt('Invalid username.');
-        }
-
-        if (is_brute_force_attempt($username)) {
-            block_login_attempt('Too many login attempts. Please try 
-again later.');
-        }
-
-        if (!is_password_valid($password)) {
-            block_login_attempt('Your password must be at least 8 
-characters long and contain at least one uppercase letter, one lowercase
- letter, one digit, and one special character. Common passwords like 
-"123456" or "password" are not allowed.');
-        }
-        
-        log_login_attempt($username, 'success');
+    public function __construct() {
+        add_action('login_form', [$this, 'validate_login']);
+        add_action('wp_login_failed', [$this, 'log_failed_login']);
     }
 
-}
+    public function validate_login() {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['log']) && isset($_POST['pwd'])) {
+            $username = sanitize_user($_POST['log']);
+            $password = $_POST['pwd'];
 
-function is_user_valid($username) {
-    $user = get_user_by('login', $username);
-    if (!$user) {
-        return false;
-    }
+            if (!$this->is_nonce_valid()) {
+                $this->block_login_attempt('Invalid security token.');
+            }
 
-    $allowed_permission_levels = array('administrator', 'editor', 
-'author');
-    $user_roles = $user->roles;
+            if (!$this->is_user_authorized($username)) {
+                $this->block_login_attempt('Unauthorized access.');
+            }
 
-    foreach ($user_roles as $role) {
-        if (in_array($role, $allowed_permission_levels)) {
-            return true;
+            if ($this->is_brute_force_attempt($username)) {
+                $this->block_login_attempt('Too many login attempts. Please try again later.');
+            }
+
+            if (!$this->is_password_strong($password)) {
+                $this->block_login_attempt('Weak password. Please choose a stronger one.');
+            }
         }
     }
-    return false;
-}
 
-function is_brute_force_attempt($username) {
-    $ip = $_SERVER['REMOTE_ADDR'];
-    $attempts = get_user_meta($username, 'login_attempts', true);
-    if (!$attempts) {
-        $attempts = array();
+    private function is_nonce_valid() {
+        return isset($_POST['_wpnonce']) && wp_verify_nonce(sanitize_text_field($_POST['_wpnonce']), 'login_form');
     }
 
-    $max_attempts = 5;
-    $ip_attempts = array_filter($attempts, function ($attempt) use ($ip)
- {
-        return $attempt['ip'] === $ip;
+    private function is_user_authorized($username) {
+        $user = get_user_by('login', $username);
+        if (!$user) {
+            return false;
+        }
 
-    });
+        $user_roles = (array) $user->roles;
+        return count(array_intersect($this->allowed_roles, $user_roles)) > 0;
+    }
 
-    if (count($ip_attempts) >= $max_attempts) {
-        log_login_attempt($username, 'blocked');
+    private function is_password_strong($password) {
+        if (strlen($password) < $this->password_min_length) {
+            return false;
+        }
+
+        if (!preg_match('/[A-Z]/', $password)) {
+            return false;
+        }
+
+        if (!preg_match('/[a-z]/', $password)) {
+            return false;
+        }
+
+        if (!preg_match('/\d/', $password)) {
+            return false;
+        }
+
+        if (!preg_match('/[^A-Za-z0-9]/', $password)) {
+            return false;
+        }
+
+        if (in_array($password, $this->common_passwords, true)) {
+            return false;
+        }
+
         return true;
     }
 
-    $attempts[] = array(
-        'ip' => $ip,
-        'timestamp' => time(),
-    );
+    private function is_brute_force_attempt($username) {
+        $ip = $this->get_user_ip();
+        $transient_key = 'login_attempts_' . $username . '_' . $ip;
+        $attempts = get_transient($transient_key);
 
-    update_user_meta($username, 'login_attempts', $attempts);
-
-    return false;
-}
-
-function is_password_valid($password) {
-    if (strlen($password) < 8) {
-        return false;
-    }
-
-    $password_checks = array(
-        '/[A-Z]/', // At least one uppercase letter
-        '/[a-z]/', // At least one lowercase letter
-        '/\d/',    // At least one digit
-        '/[^A-Za-z0-9]/', // At least one special character
-    );
-
-    foreach ($password_checks as $check) {
-        if (!preg_match($check, $password)) {
-            return false;
+        if ($attempts === false) {
+            $attempts = 0;
         }
-    }
 
-    $common_passwords = array('123456', 'password', 'qwerty');
-    if (in_array($password, $common_passwords)) {
+        if ($attempts >= $this->max_login_attempts) {
+            return true;
+        }
+
+        $attempts++;
+        set_transient($transient_key, $attempts, $this->lockout_duration);
         return false;
     }
-    return true;
+
+    private function block_login_attempt($error_message) {
+        $login_url = wp_login_url();
+        $redirect_url = add_query_arg('login_error', urlencode($error_message), $login_url);
+        wp_safe_redirect($redirect_url);
+        exit;
+    }
+
+    private function log_failed_login($username) {
+        $ip = $this->get_user_ip();
+        error_log(sprintf('Failed login attempt for user "%s" from IP "%s"', $username, $ip));
+    }
+
+    private function get_user_ip() {
+        if (isset($_SERVER["HTTP_CF_CONNECTING_IP"])) {
+            $_SERVER['REMOTE_ADDR'] = $_SERVER["HTTP_CF_CONNECTING_IP"];
+        }
+
+        return sanitize_text_field($_SERVER['REMOTE_ADDR']);
+    }
 }
 
-function block_login_attempt($error_message) {
-    $login_url = site_url('wp-login.php');
-    wp_redirect(add_query_arg(array(
-        'login_error' => urlencode($error_message),
-        'interim_login' => 1,
-    ), $login_url));
-    exit;
-}
-
-function log_login_attempt($username, $status) {
-    $log_entry = sprintf('[%s] Login attempt for user "%s" - Status: 
-%s', date('Y-m-d H:i:s'), $username, $status);
-    error_log($log_entry);
-}
+new UserformValidator();
